@@ -18,13 +18,46 @@ symbols = [
     "NSE:ICICIBANK-EQ","NSE:TVSMOTORS-EQ"
 ]
 
-excel_file = "live_signals.xlsx"
 
-# --------- Function to fetch candle data ---------
+excel_file = "live_signals2.xlsx"
+
+# --------- Excel Loader/Updater ---------
+def load_existing_signals():
+    if os.path.exists(excel_file):
+        df = pd.read_excel(excel_file)
+        signals = {}
+        for _, row in df.iterrows():
+            if row['status'] in ["Open", "Holding"]:
+                signals[row['symbol']] = row.to_dict()
+        return signals, df
+    else:
+        columns = ["symbol", "signal", "entry_price", "sl", "tp", "signal_time",
+                   "status", "exit_reason", "exit_time", "pnl"]
+        return {}, pd.DataFrame(columns=columns)
+
+def update_excel(df, signal_data):
+    symbol = signal_data["symbol"]
+    signal_time = signal_data["signal_time"]
+
+    existing_row = df[
+        (df["symbol"] == symbol) & (df["signal_time"] == signal_time)
+    ]
+
+    if not existing_row.empty:
+        index = existing_row.index[0]
+        for key in signal_data:
+            df.at[index, key] = signal_data[key]
+    else:
+        df = pd.concat([df, pd.DataFrame([signal_data])], ignore_index=True)
+
+    df.to_excel(excel_file, index=False)
+    return df
+
+# --------- Fetch OHLC ---------
 def fetch_ohlc(symbol):
     data = {
         "symbol": symbol,
-        "resolution": "30",  # 30-minute candles
+        "resolution": "30",
         "date_format": "1",
         "range_from": (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d"),
         "range_to": datetime.now().strftime("%Y-%m-%d"),
@@ -38,8 +71,7 @@ def fetch_ohlc(symbol):
         return df
     return pd.DataFrame()
 
-
-# --------- Strategy Function ---------
+# --------- Signal Checker ---------
 def check_signal(symbol, existing_signals):
     df = fetch_ohlc(symbol)
     if df.empty or len(df) < 20:
@@ -50,7 +82,6 @@ def check_signal(symbol, existing_signals):
     df["RSI"] = ta.rsi(df["close"], length=14)
     adx = ta.adx(df["high"], df["low"], df["close"], length=14)
     df["ADX"] = adx["ADX_14"] if adx is not None else None
-
     df.dropna(inplace=True)
 
     df["ha_close"] = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
@@ -67,20 +98,20 @@ def check_signal(symbol, existing_signals):
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # ----- Exit Logic -----
+    # --------- Exit Logic ---------
     if symbol in existing_signals:
         signal_data = existing_signals[symbol]
-        entry_price = signal_data['entry_price']
-        sl = signal_data['sl']
-        tp = signal_data['tp']
+        entry = signal_data["entry_price"]
+        sl = signal_data["sl"]
+        tp = signal_data["tp"]
 
         if signal_data["signal"] == "Buy":
             if latest["low"] <= sl and latest["high"] >= tp:
                 signal_data.update({
-                    "status": "Hit TP" if latest["close"] > entry_price else "Hit SL",
+                    "status": "Hit TP" if latest["close"] > entry else "Hit SL",
                     "exit_reason": "SL & TP same candle",
                     "exit_time": now,
-                    "pnl": round(tp - entry_price if latest["close"] > entry_price else sl - entry_price, 2)
+                    "pnl": round(tp - entry if latest["close"] > entry else sl - entry, 2)
                 })
                 return signal_data
             elif latest["low"] <= sl:
@@ -88,7 +119,7 @@ def check_signal(symbol, existing_signals):
                     "status": "Hit SL",
                     "exit_reason": "SL Hit",
                     "exit_time": now,
-                    "pnl": round(sl - entry_price, 2)
+                    "pnl": round(sl - entry, 2)
                 })
                 return signal_data
             elif latest["high"] >= tp:
@@ -96,17 +127,17 @@ def check_signal(symbol, existing_signals):
                     "status": "Hit TP",
                     "exit_reason": "TP Hit",
                     "exit_time": now,
-                    "pnl": round(tp - entry_price, 2)
+                    "pnl": round(tp - entry, 2)
                 })
                 return signal_data
 
         elif signal_data["signal"] == "Sell":
             if latest["high"] >= sl and latest["low"] <= tp:
                 signal_data.update({
-                    "status": "Hit TP" if latest["close"] < entry_price else "Hit SL",
+                    "status": "Hit TP" if latest["close"] < entry else "Hit SL",
                     "exit_reason": "SL & TP same candle",
                     "exit_time": now,
-                    "pnl": round(entry_price - tp if latest["close"] < entry_price else entry_price - sl, 2)
+                    "pnl": round(entry - tp if latest["close"] < entry else entry - sl, 2)
                 })
                 return signal_data
             elif latest["high"] >= sl:
@@ -114,7 +145,7 @@ def check_signal(symbol, existing_signals):
                     "status": "Hit SL",
                     "exit_reason": "SL Hit",
                     "exit_time": now,
-                    "pnl": round(entry_price - sl, 2)
+                    "pnl": round(entry - sl, 2)
                 })
                 return signal_data
             elif latest["low"] <= tp:
@@ -122,20 +153,19 @@ def check_signal(symbol, existing_signals):
                     "status": "Hit TP",
                     "exit_reason": "TP Hit",
                     "exit_time": now,
-                    "pnl": round(entry_price - tp, 2)
+                    "pnl": round(entry - tp, 2)
                 })
                 return signal_data
 
-        # Still Holding
         signal_data.update({
             "status": "Holding",
             "exit_reason": "HOLD",
             "exit_time": "",
-            "pnl": round(latest["close"] - entry_price if signal_data["signal"] == "Buy" else entry_price - latest["close"], 2)
+            "pnl": round(latest["close"] - entry if signal_data["signal"] == "Buy" else entry - latest["close"], 2)
         })
         return signal_data
 
-    # ----- New Buy Signal -----
+    # --------- Buy Signal ---------
     if (
         latest["EMA_10"] > latest["EMA_20"] and
         prev1["EMA_10"] > prev1["EMA_20"] and
@@ -143,14 +173,14 @@ def check_signal(symbol, existing_signals):
         latest["RSI"] > 60 and latest["ADX"] > 25 and
         latest["ha_close"] > latest["ha_open"]
     ):
-        entry = latest["ha_open"]
+        entry = round(latest["ha_open"], 2)
         signal_data = {
             "symbol": symbol,
-            "signal_time": now,
             "signal": "Buy",
-            "entry_price": round(entry, 2),
+            "entry_price": entry,
             "sl": round(entry * 0.995, 2),
             "tp": round(entry * 1.01, 2),
+            "signal_time": now,
             "status": "Open",
             "exit_reason": "HOLD",
             "exit_time": "",
@@ -159,22 +189,22 @@ def check_signal(symbol, existing_signals):
         existing_signals[symbol] = signal_data
         return signal_data
 
-    # ----- New Sell Signal -----
-    elif (
+    # --------- Sell Signal ---------
+    if (
         latest["EMA_10"] < latest["EMA_20"] and
         prev1["EMA_10"] < prev1["EMA_20"] and
         prev2["EMA_10"] < prev2["EMA_20"] and
         latest["RSI"] < 40 and latest["ADX"] > 25 and
         latest["ha_close"] < latest["ha_open"]
     ):
-        entry = latest["ha_open"]
+        entry = round(latest["ha_open"], 2)
         signal_data = {
             "symbol": symbol,
-            "signal_time": now,
             "signal": "Sell",
-            "entry_price": round(entry, 2),
+            "entry_price": entry,
             "sl": round(entry * 1.005, 2),
             "tp": round(entry * 0.99, 2),
+            "signal_time": now,
             "status": "Open",
             "exit_reason": "HOLD",
             "exit_time": "",
@@ -185,36 +215,22 @@ def check_signal(symbol, existing_signals):
 
     return None
 
-
-# --------- Logger ---------
-def log_to_excel(signal_data):
-    if os.path.exists(excel_file):
-        df = pd.read_excel(excel_file)
-    else:
-        df = pd.DataFrame(columns=[
-            "symbol", "signal", "entry_price", "sl", "tp", "signal_time",
-            "status", "exit_reason", "exit_time", "pnl"
-        ])
-    if signal_data:
-        df = pd.concat([df, pd.DataFrame([signal_data])], ignore_index=True)
-    df.to_excel(excel_file, index=False)
-
-
 # --------- Main Loop ---------
-print("🔁 Starting live signal check... (updates every 5 minutes)")
-existing_signals = {}
+print("🔁 Starting live signal check... (every 5 minutes)")
+existing_signals, log_df = load_existing_signals()
 
 while True:
-    print(f"\n🕐 Checking signals at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n🕐 Checking at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     for symbol in symbols:
         try:
             result = check_signal(symbol, existing_signals)
             if result:
-                print(f"✅ {symbol}: {result['signal']} | Entry: {result['entry_price']} | SL: {result['sl']} | TP: {result['tp']} | Status: {result['status']}")
-                log_to_excel(result)
+                print(f"✅ {symbol} | {result['signal']} | Entry: {result['entry_price']} | SL: {result['sl']} | TP: {result['tp']} | Status: {result['status']}")
+                log_df = update_excel(log_df, result)
             else:
                 print(f"🔍 {symbol}: No Signal")
         except Exception as e:
-            print(f"⚠️ {symbol} error: {e}")
+            print(f"⚠️ Error on {symbol}: {e}")
     print("-" * 60)
-    time.sleep(300)  # Wait 5 minutes
+    time.sleep(300)
+
